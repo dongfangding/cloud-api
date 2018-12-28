@@ -26,7 +26,78 @@ public class ApiConfiguration {
         return new Request.Options();
     }
 
-
+	@Bean
+	@LoadBalanced
+	@Primary
+	public RestTemplate restTemplate() {
+		return new RestTemplate();
+	}
+	
+	/**
+	 * 对于某些非Eureka服务的请求，可以去除@LoadBalanced注解
+	 * @return
+	 */
+	@Bean
+	public RestTemplate urlFactoryRestTemplate() {
+		SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+		requestFactory.setConnectTimeout(3000);
+		requestFactory.setReadTimeout(3000);
+		return new RestTemplate(requestFactory);
+	}
+	
+	/**
+	 * 使用json来序列化来操作redis的缓存存取，默认使用的jdk的序列化和反序列化
+	 * @param redisConnectionFactory
+	 * @return
+	 */
+	@Bean
+	@Primary
+	public RedisTemplate<Object, Object> redisTemplate(
+			RedisConnectionFactory redisConnectionFactory){
+		RedisTemplate<Object, Object> template = new RedisTemplate<>();
+		template.setConnectionFactory(redisConnectionFactory);
+		template.setDefaultSerializer(new GenericJackson2JsonRedisSerializer());
+		return template;
+	}
+	
+	
+	@Bean
+	@Primary
+	public ObjectMapper objectMapper() {
+		return new ObjectMapper();
+	}
+	
+	/**
+	 * 默认线程池
+	 * @return
+	 */
+	@Bean
+	@Primary
+	public Executor taskExecutor() {
+		ThreadPoolTaskExecutor threadPoolTaskExecutor = new ThreadPoolTaskExecutor();
+		threadPoolTaskExecutor.setThreadNamePrefix(DEFAULT_TASK_EXECUTOR);
+		threadPoolTaskExecutor.setCorePoolSize(8);
+		threadPoolTaskExecutor.setMaxPoolSize(50);
+		threadPoolTaskExecutor.setKeepAliveSeconds(0);
+		threadPoolTaskExecutor.setQueueCapacity(1000);
+		return threadPoolTaskExecutor;
+	}
+	
+	
+	/**
+	 * 定时任务调度线程池
+	 * @return
+	 */
+	@Bean
+	@Primary
+	public Executor scheduledExecutorService() {
+		ThreadFactory namedThreadFactory = new ThreadFactoryBuilder()
+				.setNameFormat("scheduledExecutorService-%d").build();
+		ScheduledThreadPoolExecutor scheduledExecutorService = new ScheduledThreadPoolExecutor(8,
+				namedThreadFactory);
+		scheduledExecutorService.setMaximumPoolSize(50);
+		return scheduledExecutorService;
+	}
 
 
 }
