@@ -7,7 +7,8 @@
 因目前开发模块越来越多，有很多在一个项目中已经定义的方法，再开发另外一个系统的时候，总是需要再开发复制一份，如果是针对公共接口的时候，很可能原接口进行了修改，过多的业务系统都要重新进行修改，所以设想开发一个独立的模块，该模块对所有公共的方法，远程调用`api`进行统一封装，别的模块引入这个模块即可直接使用，同时也可以对该模块进行修改。
 
 ### 2. 存在问题  
-该模块在`pom.xml`中引入之后，需要自行前往`svn`将项目拉取下来，然后使用`maven install`命令，安装到本地使用，这样方便如果对源码进行修改，可以更方便的即使调试，但无形之中对一部分使用会造成相当麻烦，因此这种方式适合内部开发人员使用。
+该模块在`pom.xml`中引入之后，需要自行前往`svn`将项目拉取下来，然后使用`maven install`命令，安装到本地使用，这样方便如果对源码进行修改，可以更方便的即使调试，后续如果使用成熟后，会再放到私服中
+
 ## 二、开发与使用  
 ### 1. 项目地址  
 http://172.30.21.33:10080/svn/HuaDong/hd_micro_service/02.code/microservice-api
@@ -83,8 +84,8 @@ feign:
         readTimeout: 3333
         connectTimeout: 4444
       myFeign:   #Feign接口对应的服务名,默认，可以覆盖default
-        readTimeout: 3333
-        connectTimeout: 4444
+        readTimeout: 5555
+        connectTimeout: 6666
 ```
 
 ### 2. 服务端获取客户端的请求并识别其中的登陆用户信息  
@@ -169,16 +170,16 @@ public class CommonService {
     @Setter
     private UserContext userContext;
 
-	public String appendCommonUpdateSql(String userName) {
-		if (userContext != null && userContext.getUid() != null) {
-			userName = userContext.getUid();
-		}
-		if (Constants.isNull(userName)) {
-			userName = Thread.currentThread().getName();
-		}
-		return " VERSION = VERSION + 1, MODIFY_BY = '" + userName + "'," +
-				" MODIFY_TIME = FUC_NUMBER2TIMESTAMP(" + System.currentTimeMillis() + ") ";
-	}
+    public String appendCommonUpdateSql(String userName) {
+        if (userContext != null && userContext.getUid() != null) {
+            userName = userContext.getUid();
+        }
+        if (Constants.isNull(userName)) {
+            userName = Thread.currentThread().getName();
+        }
+        return " VERSION = VERSION + 1, MODIFY_BY = '" + userName + "'," +
+                " MODIFY_TIME = FUC_NUMBER2TIMESTAMP(" + System.currentTimeMillis() + ") ";
+    }
 }
 ```
 正常任务类，该类需要调用另外一个异步任务类，在当前类中`UserContext`还是能够正常注入的  
@@ -228,4 +229,313 @@ c.s.h.microservice.api.aspect.RequestContextAspect - [com.sinotrans.hd.account_c
 
 ```
 
+### 4. 客户端基于Session作用域的用户信息保存  
+> 客户端每当重新登录或重新刷新界面都会重新请求最新的用户信息，而后端服务如果需要获取当前用户信息，就需要根据当前登录的u_id去重复请求当前用户信息，而且不同的方法还需要重复去请求，这就导致了无畏的多次重复请求，因此该功能提供了一个解决思路，每当界面重新请求用户信息时，该功能就会收集每次请求的用户信息返回的结果保存到基于Session作用域的一个容器中，这样既利用了本来就需要请求的这次结果，又避免了其它方法想要使用用户信息还需要重复获取的过程；以后该用户需要使用用户信息的时候只要直接注入该对象，从中获取即可；而每次前端刷新重新获取用户信息，最新的用户信息又会覆盖到原来的值中；
+
+使用步骤
+* 在配置类上加入注解`@EnableSessionContext`开启该功能  
+
+```java
+@Configuration
+@EnableSessionContext
+public class config() {
+    
+}
+```
+
+* 使用注解`@CurrUser`标识自己项目中获取用户信息的方法 
+
+```java
+@RestController
+public class UserController {
+    
+    @RequestMapping("/currUser")
+    @CurrUser
+    public Map<String, Object> getCurrUser() {
+        // return 当前用户信息
+    }
+}
+```
+
+
+* 注入`SessionContext`使用  
+```java
+@Service
+public class UserService() {
+    
+    @Autowired
+    private SessionContext sessionContext;
+    
+    public void permission() {
+        Map<String, Object> currUser = sessionContext.getCurrUserMap();
+        // .............
+    }
+}
+```
+
+* 注意事项
+`SessionContext`在线程任务中无法直接注入该对象，使用会报错；因为一旦一个主请求结束，随之`Session`作用域会不能存在，因此，需要使用方在主任务还未结束线程任务未开始之前，将该对象传入线程任务中，方可正常使用；
+
+### 5. 通用跨服务列表查询
+有一些列表查询，分属不同的服务，但调用通用方法却相同，比如组织架构的系统表，公共服务的数据字典表等，如果在第三个服务中需要调用，那么普遍的做法是第三方服务调用系统表或数据字典表之后再暴露接口给前端使用，这样每次都是要查询通用列表，而只是因为表不同或者服务不同，就需要暴露不同的方法，重复量太多，因此这里增加一个控制层方法接收服务名和要调用的表，然后去调用通用方法，这样就可以完成不同的服务对不同的表的简单化,其实本质上还是原框架中的通用查询
+
+代码如下： 
+```java
+package com.sinotrans.hd.microservice.api.controller;
+
+import com.sinotrans.hd.common.http.Page;
+import com.sinotrans.hd.microservice.api.util.Constants;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.RestTemplate;
+
+/**
+ * @author DDf on 2018/5/29
+ */
+@RestController
+@RequestMapping("/apiCommon")
+public class CommonApplicationController {
+    @Autowired
+    private RestTemplate restTemplate;
+
+
+    /**
+     * 有一些通用的列表查询，查询的表不同，可能所在的服务也不同，但每个服务都有相同
+     * 的通用方法，为了方便调用指定服务下的通用方法查询某张表的列表数据，对原通用方法进行
+     * 稍微修改，使前端可以直接调用指定服务名下的通用列表查询方法
+     *
+     * @param applicationName 服务名
+     * @param JName           要查询的表名
+     * @param page            页数
+     * @param lines           条数
+     * @param httpHeaders     header
+     * @param whereColumns    列
+     * @param whereOprators   操作符
+     * @param whereValues     属性值
+     * @param whereRelations  两个属性之间的关系符
+     * @return
+     */
+    @RequestMapping("/pagedList")
+    public Page pagedList(
+            @RequestParam String applicationName, @RequestParam String JName,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer lines,
+            @RequestHeader HttpHeaders httpHeaders,
+            @RequestParam(value = "WHERE_COLUMNS", required = false) String whereColumns,
+            @RequestParam(value = "WHERE_OPRATORS", required = false) String whereOprators,
+            @RequestParam(value = "WHERE_VALUES", required = false) String whereValues,
+            @RequestParam(value = "WHERE_RELATIONS", required = false) String whereRelations) {
+        String url = "http://" + applicationName + "/GetPagedJsonByName?JName=" + JName;
+        if (page != null) {
+            url += "&page=" + page;
+        }
+        if (lines != null) {
+            url += "&lines=" + lines;
+        }
+        if (Constants.isNotNull(whereColumns)) {
+            url += "&WHERE_COLUMNS=" + whereColumns;
+        }
+        if (Constants.isNotNull(whereOprators)) {
+            url += "&WHERE_OPRATORS=" + whereOprators;
+        }
+        if (Constants.isNotNull(whereValues)) {
+            url += "&WHERE_VALUES=" + whereValues;
+        }
+        if (Constants.isNotNull(whereRelations)) {
+            url += "&WHERE_RELATIONS=" + whereRelations;
+        }
+        return restTemplate.postForObject(url, httpHeaders, Page.class);
+    }
+}
+```
+
+
+
+## 四、原包改进
+在项目中一定会引用的`jar`包中提供的某些功能，在实际使用过程中发现会带来一些不友好的感受，所以单方面会对个别已存在的类提供的功能或覆盖或改进，都统一在这个模块说明；以下功能不需要将代码复制到自己项目中！！！！
+
+### 1. com.sinotrans.hd.microService.exception.DataException
+> 该类提供的自定义异常继承自`Exception`，并且之后对该异常的支持不是特别友好，因此使用了全新的异常类继承自`org.springframework.core.NestedRuntimeException`运行时异常更为妥帖；
+暂不支持国际化和占位符；
+
+`GlobalCustomizeException.java`
+```java
+package com.sinotrans.hd.microservice.api.exception;
+
+import org.springframework.core.NestedRuntimeException;
+
+/**
+ * 自定义异常类
+ * @author DDF 2017年11月28日
+ *
+ */
+public class GlobalCustomizeException extends NestedRuntimeException {
+    private static final long serialVersionUID = 1L;
+    private String code;
+    private String message;
+
+    public GlobalCustomizeException(String message) {
+        super(message);
+        this.message = message;
+    }
+
+    public GlobalCustomizeException(String code, String message) {
+        super(message);
+        this.code = code;
+        this.message = message;
+    }
+
+    public String getCode() {
+        return code;
+    }
+
+    public void setCode(String code) {
+        this.code = code;
+    }
+
+    @Override
+    public String getMessage() {
+        return message;
+    }
+
+    public void setMessage(String message) {
+        this.message = message;
+    }
+}
+
+```
+
+### 2. com.sinotrans.hd.filter.DataDefaultAdvice
+> 该类原意为对系统中的各个不同的异常做响应处理，但区分太细，并且返回的语句十分不友好，并且对自定义的异常支持也不是很好，因`springboot`本身提供的错误属性针对目前开发来说已经足够使用，因此对该类采取直接覆盖的方法；并适当对`springboot`提供的返回属性进行修改，用以支持在第一步新建立的自定义异常；当然这里只是作为一个默认的修改，如果引用方对该修改不满意，可以自行修改；因此这里注入的时候使用了`@ConditionalOnMissingBean`注解；
+
+`ErrorAttributes.java`  
+```java
+package com.sinotrans.hd.microservice.api.exception;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.web.DefaultErrorAttributes;
+import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestAttributes;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.Map;
+
+/**
+ * Created by DDf on 2018/4/20
+ */
+@ConditionalOnMissingBean
+public class ErrorAttributes extends DefaultErrorAttributes {
+    private Logger logger = LoggerFactory.getLogger("exception");
+    @Override
+    public Map<String, Object> getErrorAttributes(RequestAttributes requestAttributes, boolean includeStackTracee) {
+        Map<String, Object> errorAttributes = super.getErrorAttributes(requestAttributes, includeStackTracee);
+        Throwable error = getError(requestAttributes);
+        if (error == null) {
+            return errorAttributes;
+        }
+        StringWriter sw = new StringWriter();
+        PrintWriter pw = new PrintWriter(sw);
+        error.printStackTrace(pw);
+        logger.error(sw.toString());
+        if (error instanceof GlobalCustomizeException) {
+            errorAttributes.put("code", ((GlobalCustomizeException) error).getCode());
+            errorAttributes.put("message", error.getMessage());
+        } else {
+            error.printStackTrace();
+            errorAttributes.put("code", "SYSTEM_ERROR");
+            errorAttributes.put("message", "系统异常！");
+            // 这里作为一个补充返回，可以在前端开发时更方便看到异常栈信息与接口开发者交流
+            errorAttributes.put("details", sw.toString());
+        }
+        return errorAttributes;
+    }
+}
+```
+
+### 3. com.sinotrans.microService.client.filter.ClientDefultAdvice
+> 该类问题大致与`com.sinotrans.hd.microService.exception.DataException`一致，并且不能友好的支持接收服务端抛出的异常然后返回到前端；因此使用如下新的类代替，类的全名不能和原类一样，否则一样会被移除！
+
+`ClientDefultAdvice.java`
+```java
+package com.sinotrans.hd.microservice.api.exception;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.client.RestClientResponseException;
+
+/**
+ * 接收服务端抛出的异常并将异常消息返回到前端展示
+ *
+ * @author DDf on 2018/4/20
+ */
+@Order(Ordered.HIGHEST_PRECEDENCE + 100)
+@ControllerAdvice
+@ResponseBody
+public class ClientDefaultAdvice {
+    private static Logger logger = LoggerFactory.getLogger(ClientDefaultAdvice.class);
+
+    /**
+     * 接收服务端返回的异常，接收处理后返回给前端展示
+     *
+     * @param ex
+     * @return
+     */
+    @ExceptionHandler(value = RestClientResponseException.class)
+    @ResponseStatus(value = HttpStatus.INTERNAL_SERVER_ERROR)
+    public String exceptionHandler(RestClientResponseException ex) {
+        logger.error("系统出现异常： {}", ex);
+        return ex.getResponseBodyAsString();
+    }
+}
+
+```
+
+### 4. 对以上三点的补充说明
+在通用`jar`包中直接按照原来的包路径进行源码覆盖，如果第三方应用导入该项目`jar`包，发现并不能成功覆盖，因此如果使用该项目，则会在项目启动时将原来的两个默认处理类进行删除,新的处理类与原类型一直，但所属不同包
+
+```java
+package com.sinotrans.hd.microservice.api.config;
+
+import com.sinotrans.hd.microservice.api.exception.ClientDefaultAdvice;
+import org.springframework.beans.factory.support.BeanDefinitionBuilder;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.context.annotation.ImportBeanDefinitionRegistrar;
+import org.springframework.core.type.AnnotationMetadata;
+
+/**
+ *
+ * 移除原框架包中对服务端和客户端对异常的默认处理类，原处理对异常处理不是很友好；
+ * 且优先级别为最高，本地覆盖存在一定变数，因此直接移除，并使用全新的类来代替处理
+ *
+ * @author DDf on 2018/11/29
+ */
+public class RemoveOldDefaultAdvice implements ImportBeanDefinitionRegistrar {
+    @Override
+    public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata, BeanDefinitionRegistry registry) {
+        if (registry.containsBeanDefinition("clientDefultAdvice")) {
+            registry.removeBeanDefinition("clientDefultAdvice");
+        }
+        if (registry.containsBeanDefinition("dataDefaultAdvice")) {
+            registry.removeBeanDefinition("dataDefaultAdvice");
+        }
+
+        registry.registerBeanDefinition("clientDefaultAdvice", BeanDefinitionBuilder.genericBeanDefinition(
+                ClientDefaultAdvice.class).getBeanDefinition());
+    }
+}
+```
 
