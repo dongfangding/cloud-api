@@ -11,7 +11,7 @@
 
 ## 二、开发与使用  
 ### 1. 项目地址  
-http://172.30.21.33:10080/svn/HuaDong/hd_micro_service/02.code/microservice-api
+
 
 ### 2. 使用前提  
 #### 2.1 检索项目并本地安装  
